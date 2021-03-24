@@ -12,6 +12,7 @@ uint16_t msCoeffs[6];
 double temperature, pressure;
 bool msCurrentType;
 uint32_t d1, d2;
+float    C[7];
 
 //I2C functions
 bool sendCMD(unsigned char devAddr, unsigned char cmd) {
@@ -61,6 +62,24 @@ void msInit(void) {
   /* read calibration registers */
   for (uint8_t i = 0; i < 6; i++) {
     msCoeffs[i] = readWord(msAddr, MS5611_READ_PROM + (i * 2));
+
+
+    // do this once and you save CPU cycles
+    C[0] = 1;
+    C[1] = 32768L;
+    C[2] = 65536L;
+    C[3] = 3.90625E-3;
+    C[4] = 7.8125E-3;
+    C[5] = 256;
+    C[6] = 1.1920928955E-7;
+    // read factory calibrations from EEPROM.
+    for (uint8_t reg = 0; reg < 7; reg++)
+    {
+      // used indices match datasheet.
+      // C[0] == manufacturer - read but not used;
+      // C[7] == CRC - skipped.
+      C[reg] *= (float)readWord(msAddr, 0xA0 + (i * 2));
+    }
   }
 
   /* get first data */
@@ -148,6 +167,74 @@ void computeMeasures(void) {
   /* save result */
   temperature = (double)temp / 100.0;
   pressure = ((double)p / (double)((uint16_t)1 << 15)) / 100.0;
+}
+
+void computeFloat() {
+  // VARIABLES NAMES BASED ON DATASHEET
+  // ALL MAGIC NUMBERS ARE FROM DATASHEET
+
+  // TEMP & PRESS MATH - PAGE 7/20
+  float dT = d2 - C[5];
+  temperature = 2000 + dT * C[6];
+
+  float offset =  C[2] + dT * C[4];
+  float sens = C[1] + dT * C[3];
+
+  // SECOND ORDER COMPENSATION - PAGE 8/20
+  // COMMENT OUT < 2000 CORRECTION IF NOT NEEDED
+  // NOTE TEMPERATURE IS IN 0.01 C
+  if (temperature < 2000)
+  {
+    float T2 = dT * dT * 4.6566128731E-10;
+    float t = (temperature - 2000) * (temperature - 2000);
+    float offset2 = 2.5 * t;
+    float sens2 = 1.25 * t;
+    // COMMENT OUT < -1500 CORRECTION IF NOT NEEDED
+    if (temperature < -1500)
+    {
+      t = (temperature + 1500) * (temperature + 1500);
+      offset2 += 7 * t;
+      sens2 += 5.5 * t;
+    }
+    temperature -= T2;
+    offset -= offset2;
+    sens -= sens2;
+  }
+  // END SECOND ORDER COMPENSATION
+
+  pressure = (d1 * sens * 4.76837158205E-7 - offset) * 3.051757813E-5;
+}
+
+void computeNormal(void)
+{
+  int32_t dT = d2 - (uint32_t)msCoeffs[4] * 256;
+
+  int32_t TEMP = 2000 + ((int64_t) dT * msCoeffs[5]) / 8388608;
+  int64_t OFF = (int64_t)msCoeffs[1] * 65536 + (int64_t)msCoeffs[3] * dT / 128;
+  int64_t SENS = (int64_t)msCoeffs[0] * 32768 + (int64_t)msCoeffs[2] * dT / 256;
+
+  int32_t TEMP2 = 0;
+  int64_t OFF2 = 0;
+  int64_t SENS2 = 0;
+
+  if (TEMP < 2000) {
+    OFF2 = 5 * ((TEMP - 2000) * (TEMP - 2000)) / 2;
+    SENS2 = 5 * ((TEMP - 2000) * (TEMP - 2000)) / 4;
+    TEMP2 = (dT * dT) / (2 << 30);
+
+    if (TEMP < -1500) {
+      OFF2 = OFF2 + 7 * ((TEMP + 1500) * (TEMP + 1500));
+      SENS2 = SENS2 + 11 * ((TEMP + 1500) * (TEMP + 1500)) / 2;
+    }
+  }
+
+  TEMP = TEMP - TEMP2;
+  OFF = OFF - OFF2;
+  SENS = SENS - SENS2;
+
+  temperature = TEMP / 100.0;
+  uint32_t P = (d1 * SENS / 2097152 - OFF) / 32768;
+  pressure = P / 100.0;
 }
 
 double msComputeAltitude(void) {
