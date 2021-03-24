@@ -8,7 +8,9 @@ void setup() {
 void loop() {
   for (uint8_t i = 0; i < 50; i++) {
     msStartMeasure(i);
-    delay(10);
+    delay(MS5611_CONV_DELAY);
     Serial.println(msComputeAltitude());
+    //Serial.println(msComputePressure());
+    //Serial.println(msComputeTemperature());
   }
 }
